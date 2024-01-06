@@ -1,76 +1,133 @@
-from __future__ import division, print_function
-import os
-import numpy as np
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing import image
-import tensorflow as tf
-import cv2
-import base64
-from skimage.io import imread
-import skimage.exposure
 import streamlit as st
+import numpy as np
+import pandas as pd
+import os
+import cv2
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from tensorflow.keras.utils import to_categorical
 
-gm_exp = tf.Variable(3., dtype=tf.float32)
+# Function for image preprocessing
+def preprocess_image(image_path, target_size=(64, 64)):
+    img = cv2.imread(image_path)
+    print("img_path:", image_path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
+    img = cv2.resize(img, target_size)
+    img = img / 255.0  # Normalize pixel values to [0, 1]
+    return img
 
-def generalized_mean_pool_2d(X):
-    pool = (tf.reduce_mean(tf.abs(X**(gm_exp)), 
-                           axis=[1,2], 
-                           keepdims=False)+1.e-8)**(1./gm_exp)
-    return pool
+# Load your dataset from folders
+@st.cache
+@st.cache(allow_output_mutation=True)
+def load_dataset(data_dir):
+    data = []    # List to store image data
+    labels = []  # List to store corresponding labels
 
-# Update the path to your model
-path_to_model = 'models/model_fixed.hdf5'  # Update this line with the correct path
+    classes = os.listdir(data_dir)
 
-st.write("Loading the model...")
-model = load_model(path_to_model, compile=False)
-model.compile(optimizer='adam', metrics=['accuracy'], loss='categorical_crossentropy')
-st.write("Done!")
+    for class_name in classes:
+        class_path = os.path.join(data_dir, class_name)
+        for item_name in os.listdir(class_path):
+            item_path = os.path.join(class_path, item_name)
+            img = preprocess_image(item_path, target_size=(64, 64))
+            data.append(img)
+            labels.append(class_name)
 
-# define the classes
-classes = {
-    0: 'OSCC',
-    1: 'Normal'
-}
+    data = np.array(data)
+    labels = np.array(labels)
 
-def model_predict(img_path, model):
-    img = cv2.imread(img_path)
-    image_duplicate = img.copy()
-    hsv = cv2.cvtColor(image_duplicate, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.split(hsv)
-    h_new = (h + 90) % 180
-    hsv_new = cv2.merge([h_new, s, v])
-    bgr_new = cv2.cvtColor(hsv_new, cv2.COLOR_HSV2BGR)
-    ave_color = cv2.mean(bgr_new)[0:3]
-    color_img = np.full_like(image_duplicate, ave_color)
-    blend = cv2.addWeighted(image_duplicate, 0.5, color_img, 0.5, 0.0)
-    result = skimage.exposure.rescale_intensity(blend, in_range='image', out_range=(0, 255)).astype(np.uint8)
+    return data, labels
 
-    img = cv2.resize(result, (299, 299), interpolation=cv2.INTER_CUBIC)
-    x = image.img_to_array(img)
-    x = np.expand_dims(x, axis=0)
-    x = x / 255
+@st.cache_data(allow_output_mutation=True)
+def load_cached_dataset(data_dir):
+    return load_dataset(data_dir)
 
-    preds = model.predict(x)
-    preds = np.argmax(preds, axis=1)
-    if preds == 0:
-        preds = "Normal"
-    else:
-        preds = "OSCC"
+@st.cache_data(allow_output_mutation=True)
+def split_cached_dataset(data):
+    return split_dataset(data)
 
-    return preds
 
+# Split dataset into training and testing sets
+@st.cache_data(allow_output_mutation=True)
+def split_dataset(data):
+    train_data, test_data = train_test_split(data, test_size=0.2, random_state=42)
+    return train_data, test_data
+
+
+# Build a simple CNN model (you can replace this with your custom XceptionNet)
+def build_model(input_shape, num_classes):
+    model = Sequential()
+    model.add(Conv2D(32, (3, 3), activation='relu', input_shape=input_shape))
+    model.add(MaxPooling2D((2, 2)))
+    model.add(Conv2D(64, (3, 3), activation='relu'))
+    model.add(MaxPooling2D((2, 2)))
+    model.add(Conv2D(128, (3, 3), activation='relu'))
+    model.add(MaxPooling2D((2, 2)))
+    model.add(Flatten())
+    model.add(Dense(128, activation='relu'))
+    model.add(Dense(num_classes, activation='softmax'))
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+# Train the model
+def train_model(train_data, target_size, num_classes, epochs=10):
+    for img_path in train_data:
+        print("Processing image:", img_path)
+        X_train = np.array([preprocess_image(img_path, target_size)])
+        print("X_train shape:", X_train.shape)
+
+        # Add the rest of your code...
+        y_train = to_categorical(train_data['label'], num_classes=num_classes)
+
+        input_shape = (target_size[0], target_size[1], 3)
+        model = build_model(input_shape, num_classes)
+        model.fit(X_train, y_train, epochs=epochs)
+        return model
+
+# Evaluate the model
+def evaluate_model(model, test_data, target_size, num_classes):
+    X_test = np.array([preprocess_image(img_path, target_size) for img_path in test_data['image_path']])
+    y_test = to_categorical(test_data['label'], num_classes=num_classes)
+
+    predictions = model.predict(X_test)
+    y_pred = np.argmax(predictions, axis=1)
+
+    accuracy = accuracy_score(test_data['label'], y_pred)
+    return accuracy
+
+# Main Streamlit app
 def main():
-    st.title("Streamlit App for Model Prediction")
+    st.title("Oral Cancer Detection Web App")
 
-    uploaded_file = st.file_uploader("Choose an image...", type="jpg")
+    # Load dataset from folders
+    data_dir = 'C:\\Users\\Huawei\\OneDrive\\Documents\\dentaldesease\\oralcancer\\uploads'
+    data = load_dataset(data_dir)
 
-    if uploaded_file is not None:
-        st.image(uploaded_file, caption="Uploaded Image.", use_column_width=True)
-        st.write("")
-        st.write("Classifying...")
+    # Split dataset
+    train_data, test_data = split_dataset(data)
 
-        preds = model_predict(uploaded_file, model)
-        st.success(f"Prediction: {preds}")
+    # Display some sample data
+    st.write("Sample Data:")
+    if isinstance(train_data, tuple):
+        st.write("Train Data:")
+        st.write(train_data[0][:5], train_data[1][:5])
+        st.write("Test Data:")
+        st.write(test_data[0][:5], test_data[1][:5])
+    else:
+        st.write(data[:5])
 
-if __name__ == "__main__":
+    # Training the model
+    st.write("Training the model...")
+    model = train_model(train_data, target_size=(64, 64), num_classes=len(np.unique(data[1])), epochs=5)
+    st.write("Training complete!")
+
+    # Evaluate the model
+    st.write("Evaluating the model...")
+    accuracy = evaluate_model(model, test_data, target_size=(64, 64), num_classes=len(np.unique(data[1])))
+    st.write(f"Accuracy: {accuracy * 100:.2f}%")
+
+if __name__ == '__main__':
     main()
